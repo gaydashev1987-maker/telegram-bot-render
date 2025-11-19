@@ -1,0 +1,6 @@
+python-telegram-bot==20.7
+Pillow==10.0.1
+flask
+telegram
+flask-cors
+requests
