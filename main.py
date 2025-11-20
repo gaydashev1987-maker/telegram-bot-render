@@ -3,6 +3,7 @@ import sqlite3
 import random
 import logging
 from flask import Flask, request, jsonify
+import telegram
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 print("=" * 50)
@@ -102,7 +103,7 @@ def webhook():
     """Основной обработчик вебхука от Telegram"""
     try:
         data = request.get_json(force=True)
-        print(f"📨 Получено обновление от Telegram: {data}")
+        print(f"📨 Получено обновление от Telegram")
         
         # Обрабатываем сообщение
         if 'message' in data:
