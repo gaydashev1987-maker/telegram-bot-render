@@ -3,8 +3,8 @@ import sqlite3
 import random
 import logging
 from flask import Flask, request, jsonify
-import telegram
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+import telebot
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 print("=" * 50)
 print("🚀 ЗАПУСК БОТА НА RENDER.COM")
@@ -27,7 +27,7 @@ if not BOT_TOKEN:
 
 # ===== ИНИЦИАЛИЗАЦИЯ =====
 app = Flask(__name__)
-bot = Bot(token=BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # ===== БАЗА ДАННЫХ =====
 def init_db():
@@ -78,7 +78,8 @@ def health():
     return jsonify({
         "status": "OK", 
         "service": "telegram-bot",
-        "platform": "render.com"
+        "platform": "render.com",
+        "bot": "pyTelegramBotAPI"
     }), 200
 
 @app.route('/set_webhook')
@@ -101,44 +102,28 @@ def set_webhook():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Основной обработчик вебхука от Telegram"""
-    try:
-        data = request.get_json(force=True)
-        print(f"📨 Получено обновление от Telegram")
-        
-        # Обрабатываем сообщение
-        if 'message' in data:
-            message = data['message']
-            chat_id = message['chat']['id']
-            text = message.get('text', '')
-            user = message['from']
-            
-            print(f"💬 Сообщение от {user['id']} ({user.get('first_name', '')}): {text}")
-            
-            if text == '/start':
-                handle_start_command(chat_id, user)
-            elif str(chat_id) in active_captchas:
-                handle_captcha_response(chat_id, text, user)
-            else:
-                bot.send_message(chat_id, "❌ Для начала работы отправьте /start")
-                
-        # Обрабатываем callback от кнопок
-        elif 'callback_query' in data:
-            callback_query = data['callback_query']
-            handle_callback(callback_query)
-        
-        return 'OK'
-    except Exception as e:
-        print(f"❌ Ошибка в вебхуке: {e}")
-        return 'ERROR', 500
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    else:
+        return 'Invalid content type', 403
 
-# ===== ОБРАБОТЧИКИ СООБЩЕНИЙ =====
-def handle_start_command(chat_id, user):
+# ===== ОБРАБОТЧИКИ TELEGRAM =====
+@bot.message_handler(commands=['start'])
+def handle_start(message):
     """Обрабатывает команду /start"""
     try:
+        user = message.from_user
+        chat_id = message.chat.id
+        
+        print(f"🎯 Команда /start от {user.id} ({user.first_name})")
+        
         # Сохраняем пользователя в БД
         cursor.execute(
             'INSERT OR IGNORE INTO users (user_id, username, first_name, join_date) VALUES (?, ?, ?, datetime("now"))',
-            (user['id'], user.get('username'), user.get('first_name'))
+            (user.id, user.username, user.first_name)
         )
         conn.commit()
         
@@ -149,26 +134,49 @@ def handle_start_command(chat_id, user):
         # Отправляем каптчу пользователю
         bot.send_message(
             chat_id,
-            f"👋 Привет, {user.get('first_name', 'друг')}!\n\n"
+            f"👋 Привет, {user.first_name}!\n\n"
             f"Для доступа к боту реши пример:\n\n"
             f"🔢 **{captcha_text}**\n\n"
-            f"Отправь ответ числом:"
+            f"Отправь ответ числом:",
+            parse_mode='Markdown'
         )
-        print(f"✅ Каптча отправлена пользователю {user['id']}")
+        print(f"✅ Каптча отправлена пользователю {user.id}")
         
     except Exception as e:
         print(f"❌ Ошибка в /start: {e}")
-        bot.send_message(chat_id, "❌ Произошла ошибка. Попробуйте снова.")
+        bot.reply_to(message, "❌ Произошла ошибка. Попробуйте снова.")
 
-def handle_captcha_response(chat_id, user_answer, user):
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    """Обрабатывает все текстовые сообщения"""
+    try:
+        user = message.from_user
+        chat_id = message.chat.id
+        text = message.text
+        
+        print(f"📨 Сообщение от {user.id}: {text}")
+        
+        # Проверяем, ожидаем ли мы ответ на каптчу
+        if str(chat_id) in active_captchas:
+            handle_captcha_response(message)
+        else:
+            bot.send_message(chat_id, "❌ Для начала работы отправьте /start")
+            
+    except Exception as e:
+        print(f"❌ Ошибка обработки сообщения: {e}")
+
+def handle_captcha_response(message):
     """Проверяет ответ на каптчу"""
     try:
+        user = message.from_user
+        chat_id = message.chat.id
+        user_answer = message.text.strip()
         correct_answer = active_captchas.get(str(chat_id))
         
-        if user_answer.strip() == correct_answer:
+        if user_answer == correct_answer:
             # Каптча пройдена
             del active_captchas[str(chat_id)]
-            cursor.execute('UPDATE users SET captcha_passed = 1 WHERE user_id = ?', (user['id'],))
+            cursor.execute('UPDATE users SET captcha_passed = 1 WHERE user_id = ?', (user.id,))
             conn.commit()
             
             # Проверяем подписку на канал
@@ -181,97 +189,109 @@ def handle_captcha_response(chat_id, user_answer, user):
                 
     except Exception as e:
         print(f"❌ Ошибка проверки каптчи: {e}")
-        bot.send_message(chat_id, "❌ Ошибка проверки. Попробуй снова: /start")
+        bot.send_message(message.chat.id, "❌ Ошибка проверки. Попробуй снова: /start")
 
 def check_channel_subscription(chat_id, user):
     """Проверяет подписку на канал"""
     try:
-        member = bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user['id'])
+        member = bot.get_chat_member(CHANNEL_ID, user.id)
         
         if member.status in ['member', 'administrator', 'creator']:
             # Пользователь подписан
             bot.send_message(
                 chat_id,
                 "🎉 **Поздравляю! Доступ открыт!**\n\n"
-                "Ты успешно прошел проверку и подписан на канал!"
+                "Ты успешно прошел проверку и подписан на канал!",
+                parse_mode='Markdown'
             )
-            print(f"✅ Пользователь {user['id']} получил доступ")
+            print(f"✅ Пользователь {user.id} получил доступ")
         else:
             # Пользователь не подписан
-            keyboard = [
-                [InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)],
-                [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            keyboard = InlineKeyboardMarkup()
+            keyboard.row(
+                InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)
+            )
+            keyboard.row(
+                InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")
+            )
             
             bot.send_message(
                 chat_id,
                 "✅ **Каптча пройдена!**\n\n"
                 "Теперь подпишись на наш канал чтобы получить доступ:",
-                reply_markup=reply_markup
+                reply_markup=keyboard,
+                parse_mode='Markdown'
             )
             
     except Exception as e:
         print(f"❌ Ошибка проверки подписки: {e}")
         # Если ошибка, все равно показываем кнопку
-        keyboard = [
-            [InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)],
-            [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard = InlineKeyboardMarkup()
+        keyboard.row(
+            InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)
+        )
+        keyboard.row(
+            InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")
+        )
         
         bot.send_message(
             chat_id,
             "✅ **Каптча пройдена!**\n\n"
             "Теперь подпишись на наш канал:",
-            reply_markup=reply_markup
+            reply_markup=keyboard,
+            parse_mode='Markdown'
         )
 
-def handle_callback(callback_query):
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
     """Обрабатывает нажатия инлайн-кнопок"""
     try:
-        user = callback_query['from']
-        chat_id = callback_query['message']['chat']['id']
-        message_id = callback_query['message']['message_id']
+        user = call.from_user
+        chat_id = call.message.chat.id
+        message_id = call.message.message_id
         
-        print(f"🔘 Нажата кнопка пользователем {user['id']}")
+        print(f"🔘 Нажата кнопка пользователем {user.id}")
         
-        if callback_query['data'] == "check_sub":
+        if call.data == "check_sub":
             # Проверяем подписку при нажатии кнопки
             try:
-                member = bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user['id'])
+                member = bot.get_chat_member(CHANNEL_ID, user.id)
                 
                 if member.status in ['member', 'administrator', 'creator']:
                     # Подписка подтверждена
                     bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
-                        text="🎉 **Поздравляю! Доступ открыт!**"
+                        text="🎉 **Поздравляю! Доступ открыт!**",
+                        parse_mode='Markdown'
                     )
-                    print(f"✅ Пользователь {user['id']} подтвердил подписку")
+                    print(f"✅ Пользователь {user.id} подтвердил подписку")
                 else:
                     # Все еще не подписан
-                    keyboard = [
-                        [InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)],
-                        [InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    keyboard = InlineKeyboardMarkup()
+                    keyboard.row(
+                        InlineKeyboardButton("📢 Перейти на канал", url=CHANNEL_LINK)
+                    )
+                    keyboard.row(
+                        InlineKeyboardButton("✅ Я подписался", callback_data="check_sub")
+                    )
                     
                     bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=message_id,
                         text="❌ **Ты еще не подписался на канал!**\n\n"
                              "Пожалуйста, подпишись и нажми кнопку снова:",
-                        reply_markup=reply_markup
+                        reply_markup=keyboard,
+                        parse_mode='Markdown'
                     )
                     
             except Exception as e:
                 print(f"❌ Ошибка проверки подписки в callback: {e}")
-                bot.answer_callback_query(callback_query['id'], "❌ Ошибка проверки подписки")
+                bot.answer_callback_query(call.id, "❌ Ошибка проверки подписки")
                 
     except Exception as e:
         print(f"❌ Ошибка обработки callback: {e}")
-        bot.answer_callback_query(callback_query['id'], "❌ Произошла ошибка")
+        bot.answer_callback_query(call.id, "❌ Произошла ошибка")
 
 # ===== ЗАПУСК ПРИЛОЖЕНИЯ =====
 if __name__ == '__main__':
@@ -280,7 +300,8 @@ if __name__ == '__main__':
     # Устанавливаем вебхук при запуске
     try:
         webhook_url = "https://telegram-bot-2djw.onrender.com/webhook"
-        bot.set_webhook(webhook_url)
+        bot.remove_webhook()
+        bot.set_webhook(url=webhook_url)
         print(f"✅ Вебхук установлен: {webhook_url}")
     except Exception as e:
         print(f"⚠️ Ошибка установки вебхука: {e}")
